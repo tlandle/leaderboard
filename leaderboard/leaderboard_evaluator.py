@@ -21,6 +21,8 @@ import importlib
 import os
 import pkg_resources
 import sys
+import torchvision
+
 import carla
 from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
@@ -45,6 +47,7 @@ from leaderboard.utils.route_indexer import RouteIndexer
 
 
 sensors_to_icons = {
+    'sensor.camera.semantic_segmentation':        'carla_camera',
     'sensor.camera.rgb':        'carla_camera',
     'sensor.lidar.ray_cast':    'carla_lidar',
     'sensor.other.radar':       'carla_radar',
