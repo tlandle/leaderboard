@@ -243,8 +243,8 @@ class LeaderboardEvaluator(object):
             precipitation=config.weather.precipitation,
             precipitation_deposits=config.weather.precipitation_deposits,
             wind_intensity=config.weather.wind_intensity,
-            sun_azimuth_angle=config.weather.sun_azimuth_angle,
-            sun_altitude_angle=config.weather.sun_altitude_angle,
+            sun_azimuth_angle=config.weather.sun_azimuth,
+            sun_altitude_angle=config.weather.sun_altitude,
             fog_density=config.weather.fog_density,
             fog_distance=config.weather.fog_distance,
             wetness=config.weather.wetness
