@@ -43,8 +43,6 @@ def debug_display(tick_data, target_cam, out, steer, throttle, brake, desired_sp
     cv2.imshow('map', cv2.cvtColor(np.array(_combined), cv2.COLOR_BGR2RGB))
     cv2.waitKey(1)
 
-    # _combined.save('/tmp/video/%04d.png' % step)
-
 
 class ImageAgent(BaseAgent):
     def setup(self, path_to_conf_file):
@@ -61,20 +59,11 @@ class ImageAgent(BaseAgent):
         self._turn_controller = PIDController(K_P=1.25, K_I=0.75, K_D=0.3, n=40)
         self._speed_controller = PIDController(K_P=5.0, K_I=0.5, K_D=1.0, n=40)
 
-    @torch.no_grad()
-    def run_step(self, input_data, timestamp):
-        if not self.initialized:
-            self._init()
+    def tick(self, input_data):
+        result = super().tick(input_data)
+        result['image'] = np.concatenate(tuple(result[x] for x in ['rgb', 'rgb_left', 'rgb_right']), -1)
 
-        tick_data = self.tick(input_data)
-        gps = self._get_position(tick_data)
-        far_node, _ = self._command_planner.run_step(gps)
-
-        img = torch.cat(tuple(
-            torchvision.transforms.functional.to_tensor(tick_data[x])
-            for x in ['rgb', 'rgb_left', 'rgb_right']))[None].cuda()
-
-        theta = tick_data['compass']
+        theta = result['compass']
         theta = 0.0 if np.isnan(theta) else theta
         theta = theta + np.pi / 2
         R = np.array([
@@ -82,28 +71,43 @@ class ImageAgent(BaseAgent):
             [np.sin(theta),  np.cos(theta)],
             ])
 
-        command_target = R.T.dot(far_node - gps)
-        command_target *= 5.5
-        command_target += [128, 256]
-        command_target = np.clip(command_target, 0, 256)
-        command_target = torch.from_numpy(command_target)[None].cuda()
+        gps = self._get_position(result)
+        far_node, _ = self._command_planner.run_step(gps)
+        target = R.T.dot(far_node - gps)
+        target *= 5.5
+        target += [128, 256]
+        target = np.clip(target, 0, 256)
 
-        out, (target_cam, _) = self.net.forward(img, command_target)
-        control = self.net.controller(out).cpu().squeeze()
-        out = out.cpu().squeeze()
-        target_cam = target_cam.squeeze()
+        result['target'] = target
+
+        return result
+
+    @torch.no_grad()
+    def run_step(self, input_data, timestamp):
+        if not self.initialized:
+            self._init()
+
+        tick_data = self.tick(input_data)
+
+        img = torchvision.transforms.functional.to_tensor(tick_data['image'])
+        img = img[None].cuda()
+
+        target = torch.from_numpy(tick_data['target'])
+        target = target[None].cuda()
+
+        points, (target_cam, _) = self.net.forward(img, target)
+        control = self.net.controller(points).cpu().squeeze()
 
         steer = control[0].item()
         desired_speed = control[1].item()
         speed = tick_data['speed']
 
+        brake = desired_speed < 0.4 or (speed / desired_speed) > 1.1
+
         delta = np.clip(desired_speed - speed, 0.0, 0.25)
         throttle = self._speed_controller.step(delta)
         throttle = np.clip(throttle, 0.0, 0.75)
-        brake = desired_speed < 0.4 or (speed / desired_speed) > 1.1
-
-        if brake:
-            throttle = 0.0
+        throttle = throttle if not brake else 0.0
 
         control = carla.VehicleControl()
         control.steer = steer
@@ -112,7 +116,7 @@ class ImageAgent(BaseAgent):
 
         if DEBUG:
             debug_display(
-                    tick_data, target_cam, out,
+                    tick_data, target_cam.squeeze(), points.cpu().squeeze(),
                     steer, throttle, brake, desired_speed,
                     self.step)
 

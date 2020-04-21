@@ -89,12 +89,3 @@ class BaseAgent(autonomous_agent.AutonomousAgent):
                 'speed': speed,
                 'compass': compass
                 }
-
-    def run_step(self, input_data, timestamp):
-        control = carla.VehicleControl()
-        control.steer = -0.25
-        control.throttle = 0.8
-        control.brake = 0.0
-        control.hand_brake = False
-
-        return control
