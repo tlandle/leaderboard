@@ -1,6 +1,8 @@
 from collections import OrderedDict
 from dictor import dictor
 
+import copy
+
 from srunner.scenarioconfigs.route_scenario_configuration import RouteScenarioConfiguration
 
 
@@ -14,21 +16,21 @@ class RouteIndexer():
         self._scenarios_file = scenarios_file
         self._repetitions = repetitions
         self._configs_dict = OrderedDict()
-        self._configs_list = None
+        self._configs_list = []
         self.routes_length = []
         self._index = 0
 
         # retrieve routes
-        route_descriptions_list = RouteParser.parse_routes_file(self._routes_file, False)
+        route_configurations = RouteParser.parse_routes_file(self._routes_file, self._scenarios_file, False)
 
-        self.n_routes = len(route_descriptions_list)
+        self.n_routes = len(route_configurations)
         self.total = self.n_routes*self._repetitions
 
-        for i, route_description in enumerate(route_descriptions_list):
+        for i, config in enumerate(route_configurations):
             for repetition in range(repetitions):
-                config = RouteScenarioConfiguration(route_description, self._scenarios_file)
                 config.index = i * self._repetitions + repetition
-                self._configs_dict['{}.{}'.format(config.name, repetition)] = config
+                config.repetition_index = repetition
+                self._configs_dict['{}.{}'.format(config.name, repetition)] = copy.copy(config)
 
         self._configs_list = list(self._configs_dict.items())
 
@@ -50,7 +52,11 @@ class RouteIndexer():
         if data:
             checkpoint_dict = dictor(data, '_checkpoint')
             if checkpoint_dict and 'progress' in checkpoint_dict:
-                current_route, total_routes = checkpoint_dict['progress']
+                progress = checkpoint_dict['progress']
+                if not progress:
+                    current_route = 0
+                else:
+                    current_route, total_routes = progress
                 if current_route <= self.total:
                     self._index = current_route
                 else:

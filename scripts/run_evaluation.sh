@@ -1,10 +1,10 @@
 #!/bin/bash
-python ${LEADERBOARD_ROOT}/leaderboard/leaderboard_evaluator.py \
---challenge-mode \
+
+python3 ${LEADERBOARD_ROOT}/leaderboard/leaderboard_evaluator.py \
 --scenarios=${SCENARIOS}  \
 --routes=${ROUTES} \
 --repetitions=${REPETITIONS} \
---track=${CHALLENGE_PHASE_CODENAME} \
+--track=${CHALLENGE_TRACK_CODENAME} \
 --checkpoint=${CHECKPOINT_ENDPOINT} \
 --agent=${TEAM_AGENT} \
 --agent-config=${TEAM_CONFIG} \

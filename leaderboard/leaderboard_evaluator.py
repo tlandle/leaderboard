@@ -24,24 +24,16 @@ import sys
 import torchvision
 
 import carla
+import signal
+
 from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
-from srunner.scenarios.control_loss import *
-from srunner.scenarios.follow_leading_vehicle import *
-from srunner.scenarios.maneuver_opposite_direction import *
-from srunner.scenarios.no_signal_junction_crossing import *
-from srunner.scenarios.object_crash_intersection import *
-from srunner.scenarios.object_crash_vehicle import *
-from srunner.scenarios.opposite_vehicle_taking_priority import *
-from srunner.scenarios.other_leading_vehicle import *
-from srunner.scenarios.signalized_junction_left_turn import *
-from srunner.scenarios.signalized_junction_right_turn import *
-from srunner.scenarios.change_lane import *
-from srunner.scenarios.cut_in import *
+from srunner.scenariomanager.watchdog import Watchdog
 
 from leaderboard.scenarios.scenario_manager import ScenarioManager
 from leaderboard.scenarios.route_scenario import RouteScenario
-from leaderboard.autoagents.agent_wrapper import SensorConfigurationInvalid
+from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
+from leaderboard.autoagents.agent_wrapper import  AgentWrapper, AgentError
 from leaderboard.utils.statistics_manager import StatisticsManager
 from leaderboard.utils.route_indexer import RouteIndexer
 
@@ -77,7 +69,8 @@ class LeaderboardEvaluator(object):
         Setup ScenarioManager
         """
         self.statistics_manager = statistics_manager
-        self.sensors = []
+        self.sensors = None
+        self.sensor_icons = []
         self._vehicle_lights = carla.VehicleLightState.Position | carla.VehicleLightState.LowBeam
 
         # First of all, we need to create the client that will send the requests
@@ -88,9 +81,12 @@ class LeaderboardEvaluator(object):
             self.client_timeout = float(args.timeout)
         self.client.set_timeout(self.client_timeout)
 
+        self.traffic_manager = self.client.get_trafficmanager(int(args.trafficManagerPort))
+
         dist = pkg_resources.get_distribution("carla")
-        if LooseVersion(dist.version) < LooseVersion('0.9.9'):
-            raise ImportError("CARLA version 0.9.9 or newer required. CARLA version found: {}".format(dist))
+        if dist.version != 'leaderboard':
+            if LooseVersion(dist.version) < LooseVersion('0.9.10'):
+                raise ImportError("CARLA version 0.9.10.1 or newer required. CARLA version found: {}".format(dist))
 
         # Load agent
         module_name = os.path.basename(args.agent).split('.')[0]
@@ -98,43 +94,71 @@ class LeaderboardEvaluator(object):
         self.module_agent = importlib.import_module(module_name)
 
         # Create the ScenarioManager
-        self.manager = ScenarioManager(args.debug, args.challenge_mode, args.track, self.client_timeout)
+        self.manager = ScenarioManager(args.timeout, args.debug > 1)
 
         # Time control for summary purposes
         self._start_time = GameTime.get_time()
         self._end_time = None
+
+        # Create the agent timer
+        self._agent_watchdog = Watchdog(int(float(args.timeout)))
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """
+        Terminate scenario ticking when receiving a signal interrupt
+        """
+        if self._agent_watchdog and not self._agent_watchdog.get_status():
+            raise RuntimeError("Timeout: Agent took too long to setup")
+        elif self.manager:
+            self.manager.signal_handler(signum, frame)
 
     def __del__(self):
         """
         Cleanup and delete actors, ScenarioManager and CARLA world
         """
 
-        self._cleanup(True)
+        self._cleanup()
         if hasattr(self, 'manager') and self.manager:
             del self.manager
         if hasattr(self, 'world') and self.world:
             del self.world
 
-    def _cleanup(self, ego=False):
+    def _cleanup(self):
         """
         Remove and destroy all actors
         """
 
-        self.client.stop_recorder()
+        # Simulation still running and in synchronous mode?
+        if self.manager and self.manager.get_running_status() \
+                and hasattr(self, 'world') and self.world:
+            # Reset to asynchronous mode
+            settings = self.world.get_settings()
+            settings.synchronous_mode = False
+            settings.fixed_delta_seconds = None
+            self.world.apply_settings(settings)
+            self.traffic_manager.set_synchronous_mode(False)
+
+        if self.manager:
+            self.manager.cleanup()
 
         CarlaDataProvider.cleanup()
-        CarlaActorPool.cleanup()
 
         for i, _ in enumerate(self.ego_vehicles):
             if self.ego_vehicles[i]:
-                if ego:
-                    self.ego_vehicles[i].destroy()
+                self.ego_vehicles[i].destroy()
                 self.ego_vehicles[i] = None
         self.ego_vehicles = []
+
+        if self._agent_watchdog:
+            self._agent_watchdog.stop()
 
         if hasattr(self, 'agent_instance') and self.agent_instance:
             self.agent_instance.destroy()
             self.agent_instance = None
+
+        if hasattr(self, 'statistics_manager') and self.statistics_manager:
+            self.statistics_manager.scenario = None
 
     def _prepare_ego_vehicles(self, ego_vehicles, wait_for_ego_vehicles=False):
         """
@@ -143,12 +167,12 @@ class LeaderboardEvaluator(object):
 
         if not wait_for_ego_vehicles:
             for vehicle in ego_vehicles:
-                self.ego_vehicles.append(CarlaActorPool.setup_actor(vehicle.model,
-                                                                    vehicle.transform,
-                                                                    vehicle.rolename,
-                                                                    True,
-                                                                    color=vehicle.color,
-                                                                    vehicle_category=vehicle.category))
+                self.ego_vehicles.append(CarlaDataProvider.request_new_actor(vehicle.model,
+                                                                             vehicle.transform,
+                                                                             vehicle.rolename,
+                                                                             color=vehicle.color,
+                                                                             vehicle_category=vehicle.category))
+
         else:
             ego_vehicle_missing = True
             while ego_vehicle_missing:
@@ -174,7 +198,7 @@ class LeaderboardEvaluator(object):
 
     def _load_and_wait_for_world(self, args, town, ego_vehicles=None):
         """
-        Load a new CARLA world and provide data to CarlaActorPool and CarlaDataProvider
+        Load a new CARLA world and provide data to CarlaDataProvider
         """
 
         self.world = self.client.load_world(town)
@@ -183,153 +207,209 @@ class LeaderboardEvaluator(object):
         settings.synchronous_mode = True
         self.world.apply_settings(settings)
 
-        CarlaActorPool.set_client(self.client)
-        CarlaActorPool.set_world(self.world)
-        CarlaDataProvider.set_world(self.world)
+        self.world.reset_all_traffic_lights()
 
-        spectator = CarlaDataProvider.get_world().get_spectator()
-        spectator.set_transform(carla.Transform(carla.Location(x=0, y=0,z=20), carla.Rotation(pitch=-90)))
+        CarlaDataProvider.set_client(self.client)
+        CarlaDataProvider.set_world(self.world)
+        CarlaDataProvider.set_traffic_manager_port(int(args.trafficManagerPort))
+
+        self.traffic_manager.set_synchronous_mode(True)
+        self.traffic_manager.set_random_device_seed(int(args.trafficManagerSeed))
 
         # Wait for the world to be ready
-        if self.world.get_settings().synchronous_mode:
+        if CarlaDataProvider.is_sync_mode():
             self.world.tick()
         else:
             self.world.wait_for_tick()
 
         if CarlaDataProvider.get_map().name != town:
-            print("The CARLA server uses the wrong map!")
-            print("This scenario requires to use map {}".format(town))
-            return False
+            raise Exception("The CARLA server uses the wrong map!"
+                            "This scenario requires to use map {}".format(town))
 
-        return True
+    def _register_statistics(self, config, checkpoint, entry_status, crash_message=""):
+        """
+        Computes and saved the simulation statistics
+        """
+        # register statistics
+        current_stats_record = self.statistics_manager.compute_route_statistics(
+            config,
+            self.manager.scenario_duration_system,
+            self.manager.scenario_duration_game,
+            crash_message
+        )
+
+        print("\033[1m> Registering the route statistics\033[0m")
+        self.statistics_manager.save_record(current_stats_record, config.index, checkpoint)
+        self.statistics_manager.save_entry_status(entry_status, False, checkpoint)
 
     def _load_and_run_scenario(self, args, config):
         """
-        Load and run the scenario given by config
+        Load and run the scenario given by config.
+
+        Depending on what code fails, the simulation will either stop the route and
+        continue from the next one, or report a crash and stop.
         """
+        crash_message = ""
+        entry_status = "Started"
 
-        if not self._load_and_wait_for_world(args, config.town, config.ego_vehicles):
-            self._cleanup()
-            return
+        print("\n\033[1m========= Preparing {} (repetition {}) =========".format(config.name, config.repetition_index))
+        print("> Setting up the agent\033[0m")
 
-        agent_class_name = getattr(self.module_agent, 'get_entry_point')()
+        # Prepare the statistics of the route
+        self.statistics_manager.set_route(config.name, config.index)
+
+        # Set up the user's agent, and the timer to avoid freezing the simulation
         try:
+            self._agent_watchdog.start()
+            agent_class_name = getattr(self.module_agent, 'get_entry_point')()
             self.agent_instance = getattr(self.module_agent, agent_class_name)(args.agent_config)
             config.agent = self.agent_instance
-            self.sensors = [sensors_to_icons[sensor['type']] for sensor in self.agent_instance.sensors()]
+
+            # Check and store the sensors
+            if not self.sensors:
+                self.sensors = self.agent_instance.sensors()
+                track = self.agent_instance.track
+
+                AgentWrapper.validate_sensor_configuration(self.sensors, track, args.track)
+
+                self.sensor_icons = [sensors_to_icons[sensor['type']] for sensor in self.sensors]
+                self.statistics_manager.save_sensors(self.sensor_icons, args.checkpoint)
+
+            self._agent_watchdog.stop()
+
+        except SensorConfigurationInvalid as e:
+            # The sensors are invalid -> set the ejecution to rejected and stop
+            print("\n\033[91mThe sensor's configuration used is invalid:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
+
+            crash_message = "Agent's sensors were invalid"
+            entry_status = "Rejected"
+
+            self._register_statistics(config, args.checkpoint, entry_status, crash_message)
+            self._cleanup()
+            sys.exit(-1)
+
         except Exception as e:
-            print("Could not setup required agent due to {}".format(e))
+            # The agent setup has failed -> start the next route
+            print("\n\033[91mCould not set up the required agent:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
+
+            crash_message = "Agent couldn't be set up"
+
+            self._register_statistics(config, args.checkpoint, entry_status, crash_message)
             self._cleanup()
             return
 
-        # Prepare scenario
-        print("Preparing scenario: " + config.name)
+        print("\033[1m> Loading the world\033[0m")
 
+        # Load the world and the scenario
         try:
+            self._load_and_wait_for_world(args, config.town, config.ego_vehicles)
             self._prepare_ego_vehicles(config.ego_vehicles, False)
             scenario = RouteScenario(world=self.world, config=config, debug_mode=args.debug)
+            self.statistics_manager.set_scenario(scenario.scenario)
 
-        except Exception as exception:
-            print("The scenario cannot be loaded")
-            if args.debug:
-                traceback.print_exc()
-            print(exception)
-            self._cleanup()
-            return
+            # Night mode
+            if config.weather.sun_altitude_angle < 0.0:
+                for vehicle in scenario.ego_vehicles:
+                    vehicle.set_light_state(carla.VehicleLightState(self._vehicle_lights))
 
-        # Set the appropriate weather conditions
-        weather = carla.WeatherParameters(
-            cloudiness=config.weather.cloudiness,
-            precipitation=config.weather.precipitation,
-            precipitation_deposits=config.weather.precipitation_deposits,
-            wind_intensity=config.weather.wind_intensity,
-            sun_azimuth_angle=config.weather.sun_azimuth_angle,
-            sun_altitude_angle=config.weather.sun_altitude_angle,
-            fog_density=config.weather.fog_density,
-            fog_distance=config.weather.fog_distance,
-            wetness=config.weather.wetness
-        )
-
-        self.world.set_weather(weather)
-
-        # Set the appropriate road friction
-        if config.friction is not None:
-            friction_bp = self.world.get_blueprint_library().find('static.trigger.friction')
-            extent = carla.Location(1000000.0, 1000000.0, 1000000.0)
-            friction_bp.set_attribute('friction', str(config.friction))
-            friction_bp.set_attribute('extent_x', str(extent.x))
-            friction_bp.set_attribute('extent_y', str(extent.y))
-            friction_bp.set_attribute('extent_z', str(extent.z))
-
-            # Spawn Trigger Friction
-            transform = carla.Transform()
-            transform.location = carla.Location(-10000.0, -10000.0, 0.0)
-            self.world.spawn_actor(friction_bp, transform)
-
-        # night mode
-        if config.weather.sun_altitude_angle < 0.0:
-            for vehicle in scenario.ego_vehicles:
-                vehicle.set_light_state(carla.VehicleLightState(self._vehicle_lights))
-
-        try:
             # Load scenario and run it
             if args.record:
-                self.client.start_recorder("{}/{}.log".format(args.record, config.name))
-            self.manager.load_scenario(scenario, self.agent_instance)
-            self.statistics_manager.set_route(config.name, config.index, scenario.scenario)
+                self.client.start_recorder("{}/{}_rep{}.log".format(args.record, config.name, config.repetition_index))
+            self.manager.load_scenario(scenario, self.agent_instance, config.repetition_index)
+
+        except Exception as e:
+            # The scenario is wrong -> set the ejecution to crashed and stop
+            print("\n\033[91mThe scenario could not be loaded:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
+
+            crash_message = "Simulation crashed"
+            entry_status = "Crashed"
+
+            self._register_statistics(config, args.checkpoint, entry_status, crash_message)
+
+            if args.record:
+                self.client.stop_recorder()
+
+            self._cleanup()
+            sys.exit(-1)
+
+        print("\033[1m> Running the route\033[0m")
+
+        # Run the scenario
+        try:
             self.manager.run_scenario()
 
-            # Stop scenario
-            self.manager.stop_scenario()
+        except AgentError as e:
+            # The agent has failed -> stop the route
+            print("\n\033[91mStopping the route, the agent has crashed:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
 
-            # register statistics
-            current_stats_record = self.statistics_manager.compute_route_statistics(config,
-                                                                                    self.manager.scenario_duration_system,
-                                                                                    self.manager.scenario_duration_game)
-            # save
-            self.statistics_manager.save_record(current_stats_record, config.index, args.checkpoint)
+            crash_message = "Agent crashed"
+
+        except Exception as e:
+            print("\n\033[91mError during the simulation:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
+
+            crash_message = "Simulation crashed"
+            entry_status = "Crashed"
+
+        # Stop the scenario
+        try:
+            print("\033[1m> Stopping the route\033[0m")
+            self.manager.stop_scenario()
+            self._register_statistics(config, args.checkpoint, entry_status, crash_message)
+
+            if args.record:
+                self.client.stop_recorder()
 
             # Remove all actors
             scenario.remove_all_actors()
 
-            settings = self.world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            self.world.apply_settings(settings)
+            self._cleanup()
 
-        except SensorConfigurationInvalid as e:
-            self._cleanup(True)
-            sys.exit(-1)
         except Exception as e:
-            if args.debug:
-                traceback.print_exc()
-            print(e)
+            print("\n\033[91mFailed to stop the scenario, the statistics might be empty:")
+            print("> {}\033[0m\n".format(e))
+            traceback.print_exc()
 
-        self._cleanup()
+            crash_message = "Simulation crashed"
+
+        if crash_message == "Simulation crashed":
+            sys.exit(-1)
 
     def run(self, args):
         """
         Run the challenge mode
         """
         route_indexer = RouteIndexer(args.routes, args.scenarios, args.repetitions)
+
         if args.resume:
             route_indexer.resume(args.checkpoint)
             self.statistics_manager.resume(args.checkpoint)
         else:
             self.statistics_manager.clear_record(args.checkpoint)
+            route_indexer.save_state(args.checkpoint)
+
         while route_indexer.peek():
             # setup
             config = route_indexer.next()
 
             # run
             self._load_and_run_scenario(args, config)
-            self._cleanup(ego=True)
 
             route_indexer.save_state(args.checkpoint)
 
         # save global statistics
+        print("\033[1m> Registering the global statistics\033[0m")
         global_stats_record = self.statistics_manager.compute_global_statistics(route_indexer.total)
-        StatisticsManager.save_global_record(global_stats_record, self.sensors, args.checkpoint)
+        StatisticsManager.save_global_record(global_stats_record, self.sensor_icons, route_indexer.total, args.checkpoint)
 
 
 def main():
@@ -340,15 +420,17 @@ def main():
     parser.add_argument('--host', default='localhost',
                         help='IP of the host server (default: localhost)')
     parser.add_argument('--port', default='2000', help='TCP port to listen to (default: 2000)')
+    parser.add_argument('--trafficManagerPort', default='8000',
+                        help='Port to use for the TrafficManager (default: 8000)')
+    parser.add_argument('--trafficManagerSeed', default='0',
+                        help='Seed used by the TrafficManager (default: 0)')
     parser.add_argument('--debug', type=int, help='Run with debug output', default=0)
-    parser.add_argument('--spectator', type=bool, help='Switch spectator view on?', default=True)
     parser.add_argument('--record', type=str, default='',
                         help='Use CARLA recording feature to create a recording of the scenario')
-    parser.add_argument('--timeout', default="30.0",
+    parser.add_argument('--timeout', default="60.0",
                         help='Set the CARLA client timeout value in seconds')
 
     # simulation setup
-    parser.add_argument('--challenge-mode', action="store_true", help='Switch to challenge mode?')
     parser.add_argument('--routes',
                         help='Name of the route to be executed. Point to the route_xml_file to be executed.',
                         required=True)
