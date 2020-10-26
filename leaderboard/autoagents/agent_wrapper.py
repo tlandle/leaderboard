@@ -57,7 +57,8 @@ class AgentWrapper(object):
         'sensor.lidar.ray_cast',
         'sensor.other.radar',
         'sensor.other.gnss',
-        'sensor.other.imu'
+        'sensor.other.imu',
+        'sensor.camera.semantic_segmentation',
     ]
 
     _agent = None

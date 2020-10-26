@@ -1,4 +1,4 @@
-from srunner.scenariomanager.carla_data_provider import CarlaActorPool
+from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
 from team_code.base_agent import BaseAgent
 from team_code.planner import RoutePlanner
@@ -31,7 +31,7 @@ class MapAgent(BaseAgent):
     def _init(self):
         super()._init()
 
-        self._vehicle = CarlaActorPool.get_hero_actor()
+        self._vehicle = CarlaDataProvider.get_hero_actor()
         self._world = self._vehicle.get_world()
 
         self._waypoint_planner = RoutePlanner(4.0, 50)
