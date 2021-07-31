@@ -29,7 +29,7 @@ class BackgroundActivity(BasicScenario):
     category = "BackgroundActivity"
 
     town_amount = {
-        'Town01': 120,
+        'Town01': 1,
         'Town02': 100,
         'Town03': 120,
         'Town04': 200,

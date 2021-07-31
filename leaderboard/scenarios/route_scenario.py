@@ -34,7 +34,7 @@ from srunner.scenarios.object_crash_intersection import VehicleTurningRoute
 from srunner.scenarios.other_leading_vehicle import OtherLeadingVehicle
 from srunner.scenarios.maneuver_opposite_direction import ManeuverOppositeDirection
 from srunner.scenarios.junction_crossing_route import SignalJunctionCrossingRoute, NoSignalJunctionCrossingRoute
-
+from srunner.scenarios.ecloud_scenarios import eCloudVehicleTurningRight
 from srunner.scenariomanager.scenarioatomics.atomic_criteria import (CollisionTest,
                                                                      InRouteTest,
                                                                      RouteCompletionTest,
@@ -52,7 +52,7 @@ SECONDS_GIVEN_PER_METERS = 0.8
 INITIAL_SECONDS_DELAY = 5.0
 
 NUMBER_CLASS_TRANSLATION = {
-    "Scenario1": ControlLoss,
+    "Scenario1": eCloudVehicleTurningRight,
     "Scenario2": FollowLeadingVehicle,
     "Scenario3": DynamicObjectCrossing,
     "Scenario4": VehicleTurningRoute,
@@ -185,20 +185,20 @@ class RouteScenario(BasicScenario):
         self.config = config
         self.route = None
         self.sampled_scenarios_definitions = None
-
+        self.world = world
         self._update_route(world, config, debug_mode>0)
 
-        ego_vehicle = self._update_ego_vehicle()
+        ego_vehicles = self._update_ego_vehicle()
 
         self.list_scenarios = self._build_scenario_instances(world,
-                                                             ego_vehicle,
+                                                             ego_vehicles,
                                                              self.sampled_scenarios_definitions,
                                                              scenarios_per_tick=10,
                                                              timeout=self.timeout,
                                                              debug_mode=debug_mode>1)
 
         super(RouteScenario, self).__init__(name=config.name,
-                                            ego_vehicles=[ego_vehicle],
+                                            ego_vehicles=ego_vehicles,
                                             config=config,
                                             world=world,
                                             debug_mode=debug_mode>1,
@@ -242,20 +242,37 @@ class RouteScenario(BasicScenario):
         """
         Set/Update the start position of the ego_vehicle
         """
-        # move ego to correct position
+
+
+        ego_vehicles = []
+        # move ego to correct positio
+
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
+
+        #elevate_transform_2 = self.route[1][0]
+        #elevate_transform_2.location.z += 0.5
+
+        spawn_points = self.world.get_map().get_spawn_points()
+        spawn_point = random.choice(spawn_points)
 
         ego_vehicle = CarlaDataProvider.request_new_actor('vehicle.lincoln.mkz2017',
                                                           elevate_transform,
                                                           rolename='hero')
 
+        ego_vehicle_2 = CarlaDataProvider.request_new_actor('vehicle.tesla.model3',
+                                                          spawn_point,
+                                                          rolename='hero2')
+
+
+        ego_vehicles.append(ego_vehicle)
+        ego_vehicles.append(ego_vehicle_2)
         spectator = CarlaDataProvider.get_world().get_spectator()
         ego_trans = ego_vehicle.get_transform()
         spectator.set_transform(carla.Transform(ego_trans.location + carla.Location(z=50),
                                                     carla.Rotation(pitch=-90)))
 
-        return ego_vehicle
+        return ego_vehicles
 
     def _estimate_route_timeout(self):
         """
@@ -389,12 +406,15 @@ class RouteScenario(BasicScenario):
             scenario_configuration.trigger_points = [egoactor_trigger_position]
             scenario_configuration.subtype = definition['scenario_type']
             scenario_configuration.ego_vehicles = [ActorConfigurationData('vehicle.lincoln.mkz2017',
-                                                                          ego_vehicle.get_transform(),
-                                                                          'hero')]
+                                                                          ego_vehicle[0].get_transform(),
+                                                                          'hero'),
+                                                                          ActorConfigurationData('vehicle.tesla.model3',
+                                                                          ego_vehicle[1].get_transform(),
+                                                                          'hero2') ]
             route_var_name = "ScenarioRouteNumber{}".format(scenario_number)
             scenario_configuration.route_var_name = route_var_name
             try:
-                scenario_instance = scenario_class(world, [ego_vehicle], scenario_configuration,
+                scenario_instance = scenario_class(world, ego_vehicles, scenario_configuration,
                                                    criteria_enable=False, timeout=timeout)
                 # Do a tick every once in a while to avoid spawning everything at the same time
                 if scenario_number % scenarios_per_tick == 0:
