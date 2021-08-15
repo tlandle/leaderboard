@@ -215,7 +215,7 @@ class LeaderboardEvaluator(object):
 
         self.traffic_manager.set_synchronous_mode(True)
         self.traffic_manager.set_random_device_seed(int(args.trafficManagerSeed))
-
+        
         # Wait for the world to be ready
         if CarlaDataProvider.is_sync_mode():
             self.world.tick()
@@ -311,6 +311,10 @@ class LeaderboardEvaluator(object):
             scenario = RouteScenario(world=self.world, config=config, debug_mode=args.debug)
             self.statistics_manager.set_scenario(scenario.scenario)
 
+
+            # Make all cars ignore lights
+            for vehicle in scenario.other_actors:
+                self.traffic_manager.ignore_lights_percentage(vehicle, 100)
             # Night mode
             if config.weather.sun_altitude_angle < 0.0:
                 for vehicle in scenario.ego_vehicles:
