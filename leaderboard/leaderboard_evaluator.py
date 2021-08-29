@@ -388,7 +388,8 @@ class LeaderboardEvaluator(object):
         """
         Run the challenge mode
         """
-        route_indexer = RouteIndexer(args.routes, args.scenarios, args.repetitions)
+        route_indexer = MultiRouteIndexer(args.routes, args.scenarios, args.repetitions)
+
 
         if args.resume:
             route_indexer.resume(args.checkpoint)

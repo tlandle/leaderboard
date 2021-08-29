@@ -250,8 +250,8 @@ class RouteScenario(BasicScenario):
         elevate_transform = self.route[0][0]
         elevate_transform.location.z += 0.5
 
-        #elevate_transform_2 = self.route[1][0]
-        #elevate_transform_2.location.z += 0.5
+        elevate_transform_2 = self.route[1][0]
+        elevate_transform_2.location.z += 0.5
 
         spawn_points = self.world.get_map().get_spawn_points()
         spawn_point = random.choice(spawn_points)
