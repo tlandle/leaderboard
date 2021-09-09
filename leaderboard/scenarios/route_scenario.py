@@ -262,7 +262,7 @@ class RouteScenario(BasicScenario):
 
         ego_vehicle_2 = CarlaDataProvider.request_new_actor('vehicle.tesla.model3',
                                                           spawn_point,
-                                                          rolename='hero2')
+                                                          rolename='hero')
 
 
         ego_vehicles.append(ego_vehicle)
@@ -410,7 +410,7 @@ class RouteScenario(BasicScenario):
                                                                           'hero'),
                                                                           ActorConfigurationData('vehicle.tesla.model3',
                                                                           ego_vehicle[1].get_transform(),
-                                                                          'hero2') ]
+                                                                          'hero') ]
             route_var_name = "ScenarioRouteNumber{}".format(scenario_number)
             scenario_configuration.route_var_name = route_var_name
             try:
